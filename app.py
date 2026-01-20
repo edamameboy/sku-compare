@@ -2,12 +2,14 @@ import streamlit as st
 import pandas as pd
 from thefuzz import process, fuzz
 import io
+import time
 
 st.set_page_config(page_title="Funko SKU Validator", layout="wide")
 
-st.title("🧸 Funko Pop SKU Validator (Format Optimized)")
+st.title("🧸 Funko Pop SKU Validator")
+st.markdown("Aplikasi ini akan membandingkan data AI Anda dengan Master Database tanpa mengubah nama produk asli.")
 
-# 1. Load Master Data dari Link Google Sheets yang Anda berikan
+# 1. Load Master Data (Database Utama)
 @st.cache_data
 def load_master_data(url):
     csv_url = url.replace('/edit?usp=sharing', '/export?format=csv')
@@ -16,14 +18,13 @@ def load_master_data(url):
 master_url = "https://docs.google.com/spreadsheets/d/18CGqEdAxexoCNNFBJ9v3xgQBNm7h8ph7-phzz0jo1uA/edit?usp=sharing"
 
 try:
-    # Mengambil kolom Nama Produk dan SKU dari master
     df_master = load_master_data(master_url)
-    st.success("✅ Terhubung ke Master Database")
+    st.success("✅ Master Database Terhubung")
 except Exception as e:
     st.error(f"Gagal memuat Master Data: {e}")
 
-# 2. Upload Data AI
-file_ai = st.file_uploader("Upload Data Hasil AI (Excel/CSV)", type=['xlsx', 'csv'])
+# 2. Upload Data AI (Data B)
+file_ai = st.file_uploader("Upload Data B (Hasil AI)", type=['xlsx', 'csv'])
 
 if file_ai and 'df_master' in locals():
     if file_ai.name.endswith('.csv'):
@@ -32,57 +33,73 @@ if file_ai and 'df_master' in locals():
         df_ai = pd.read_excel(file_ai)
     
     results = []
-    st.info("Memproses validasi berdasarkan format Master Reference...")
+    
+    # UI Progress
+    st.write("### Memproses Data...")
+    progress_text = st.empty()
+    progress_bar = st.progress(0)
+    
+    total_rows = len(df_ai)
 
     for index, row in df_ai.iterrows():
-        # Ambil nama yang diinput AI (asumsi kolom bernama 'Nama Produk' atau 'NAMA PRODUK')
-        nama_ai = str(row.get('NAMA PRODUK', row.get('Nama Produk', '')))
-        sku_ai = str(row.get('SKU', ''))
+        # AMBIL DATA ASLI DARI AI (TIDAK DIUBAH)
+        nama_asli_ai = str(row.get('NAMA PRODUK', row.get('Nama Produk', '')))
+        sku_ai = str(row.get('SKU', '')).strip()
 
-        # Cari kemiripan di Master (Tanpa merubah nama asli di master)
-        # Menggunakan scorer token_set_ratio agar fleksibel terhadap urutan kata
+        # Proses Mencari Match di Master untuk Validasi SKU
         match_result = process.extractOne(
-            nama_ai, 
+            nama_asli_ai, 
             df_master['Nama Produk'].tolist(), 
             scorer=fuzz.token_set_ratio
         )
         
         if match_result:
-            match_name, score = match_result[0], match_result[1]
-            sku_master = df_master[df_master['Nama Produk'] == match_name]['SKU'].values[0]
+            match_name_master, score = match_result[0], match_result[1]
+            sku_master = str(df_master[df_master['Nama Produk'] == match_name_master]['SKU'].values[0]).strip()
             
-            # Tentukan Match Status sesuai format file Anda
-            if score == 100:
-                status = "PERFECT"
-            elif score >= 80:
-                status = "HIGH"
-            elif score > 0:
-                status = "LOW MATCH (Check!)"
+            # Tentukan Match Status (Sesuai format Master_Reference)
+            if score == 100: status_match = "PERFECT"
+            elif score >= 80: status_match = "HIGH"
+            elif score > 0: status_match = "LOW MATCH (Check!)"
+            else: status_match = "NOT FOUND"
+            
+            # VALIDASI SKU (Kolom Paling Kanan)
+            if sku_ai.upper() == sku_master.upper():
+                verifikasi_sku = "✅ SKU SESUAI"
             else:
-                status = "NOT FOUND"
+                verifikasi_sku = f"❌ TIDAK SESUAI (Master: {sku_master})"
         else:
-            match_name, score, sku_master, status = "", 0, "", "NOT FOUND"
+            score = 0
+            status_match = "NOT FOUND"
+            verifikasi_sku = "❌ DATA TIDAK DITEMUKAN"
 
+        # Simpan hasil dengan Nama Produk ASLI dari file AI
         results.append({
-            "NAMA PRODUK": match_name, # Tetap menggunakan nama dari Master
-            "SKU": sku_master,         # SKU yang seharusnya dari Master
+            "NAMA PRODUK": nama_asli_ai,  # NAMA TIDAK BERUBAH
+            "SKU": sku_ai,               # SKU DARI AI
             "Match Score": score,
-            "Match Status": status
+            "Match Status": status_match,
+            "VERIFIKASI SKU MASTER": verifikasi_sku # TABEL BARU PALING KANAN
         })
+        
+        # Update Progress Bar
+        percent_complete = int(((index + 1) / total_rows) * 100)
+        progress_bar.progress(percent_complete)
+        progress_text.text(f"Proses: {percent_complete}% ({index + 1}/{total_rows} baris)")
 
     # Tampilkan Hasil
     df_final = pd.DataFrame(results)
-    st.write("### Preview Hasil (Format Master Reference)")
+    st.write("### Hasil Akhir")
     st.dataframe(df_final, use_container_width=True)
 
     # 3. Export ke Excel
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df_final.to_excel(writer, index=False, sheet_name='Master_Reference')
+        df_final.to_excel(writer, index=False, sheet_name='Hasil_Pengecekan')
     
     st.download_button(
-        label="📥 Download Hasil (Sesuai Format Master_Reference)",
+        label="📥 Download Hasil Verifikasi (Excel)",
         data=output.getvalue(),
-        file_name="Master_Reference_Output.xlsx",
+        file_name="Verifikasi_SKU_Funko.xlsx",
         mime="application/vnd.ms-excel"
     )
